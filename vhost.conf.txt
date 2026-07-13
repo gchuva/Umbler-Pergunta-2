@@ -1,0 +1,182 @@
+# ============================================================
+# Virtual Host Nginx para WordPress
+# Configuração: Nginx + PHP-FPM/LSPHP + LSCache
+# ============================================================
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name seudominio.com www.seudominio.com;
+    
+    # Diretório raiz do WordPress
+    root /var/www/wordpress;
+    index index.php index.html index.htm;
+    
+    # Log files
+    access_log /var/log/nginx/wordpress-access.log;
+    error_log /var/log/nginx/wordpress-error.log;
+    
+    # ============================================================
+    # AJUSTE DE PERFORMANCE 1: Gzip Compression
+    # ============================================================
+    # Reduz tamanho dos arquivos enviados, melhorando velocidade
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types 
+        text/plain 
+        text/css 
+        text/xml 
+        text/javascript
+        application/json 
+        application/javascript 
+        application/x-javascript
+        application/xml 
+        application/xml+rss
+        application/xhtml+xml
+        image/svg+xml;
+    
+    # ============================================================
+    # AJUSTE DE PERFORMANCE 2: Expires para arquivos estáticos
+    # ============================================================
+    # Cache no navegador do visitante para arquivos estáticos
+    # Reduz requisições ao servidor
+    
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|pdf|txt|woff|woff2|ttf|eot|svg)$ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+    
+    # Fontes e arquivos de mídia - cache mais longo
+    location ~* \.(woff2?|ttf|eot|otf|mp4|webm)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+    
+    # ============================================================
+    # AJUSTE DE PERFORMANCE 3: LSCache para WordPress
+    # ============================================================
+    # Cache de página completa com bypass para áreas dinâmicas
+    
+    # Variáveis para controle de cache
+    set $skip_cache 0;
+    
+    # Bypass 1: Usuários logados (cookies WordPress)
+    if ($http_cookie ~* "wordpress_logged_in|comment_author|wp-postpass") {
+        set $skip_cache 1;
+    }
+    
+    # Bypass 2: Requisições ao wp-admin
+    if ($request_uri ~* "/wp-admin|/wp-login.php") {
+        set $skip_cache 1;
+    }
+    
+    # Bypass 3: Método POST (formulários, API)
+    if ($request_method = POST) {
+        set $skip_cache 1;
+    }
+    
+    # Bypass 4: Parâmetros de busca/query strings
+    if ($args ~* "s=|preview=true|nocache") {
+        set $skip_cache 1;
+    }
+    
+    # Configuração do cache LSCache
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+        
+        # Headers para LSCache
+        add_header X-LiteSpeed-Cache-Control "public, max-age=3600" always;
+        add_header Vary "Accept-Encoding, Cookie" always;
+        
+        # Se cache bypass estiver ativo, não cachear
+        if ($skip_cache = 1) {
+            add_header X-LiteSpeed-Cache-Control "no-cache" always;
+        }
+    }
+    
+    # ============================================================
+    # PROCESSAMENTO PHP - Encaminhamento para PHP-FPM/LSPHP
+    # ============================================================
+    # Requisições PHP são processadas pelo worker PHP
+    
+    location ~ \.php$ {
+        try_files $uri =404;
+        
+        # Configuração para PHP-FPM (porta 9000)
+        # Para LSPHP/LiteSpeed, usar: unix:/var/run/lsws/lsphp.sock
+        fastcgi_pass unix:/var/run/php/php-fpm.sock;
+        # fastcgi_pass 127.0.0.1:9000;  # Alternativa via TCP
+        
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        
+        # Timeouts ajustados para WordPress
+        fastcgi_connect_timeout 60s;
+        fastcgi_send_timeout 120s;
+        fastcgi_read_timeout 120s;
+        fastcgi_buffer_size 128k;
+        fastcgi_buffers 4 256k;
+        fastcgi_busy_buffers_size 256k;
+        
+        # Variáveis importantes para WordPress
+        fastcgi_param HTTPS $https;
+        fastcgi_param SCRIPT_NAME $fastcgi_script_name;
+        fastcgi_param SERVER_NAME $server_name;
+        fastcgi_param SERVER_PORT $server_port;
+        fastcgi_param SERVER_PROTOCOL $server_protocol;
+        fastcgi_param REQUEST_SCHEME $scheme;
+    }
+    
+    # ============================================================
+    # REGRAS DE SEGURANÇA
+    # ============================================================
+    
+    # Bloquear acesso a arquivos sensíveis
+    location ~* /(\.git|\.svn|\.env|composer\.json|package\.json|wp-config\.php|xmlrpc\.php) {
+        deny all;
+        return 404;
+    }
+    
+    # Bloquear acesso a logs e backups
+    location ~* \.(log|backup|old|orig|save)$ {
+        deny all;
+        return 404;
+    }
+    
+    # Proteger wp-content/uploads (execução PHP bloqueada)
+    location ~* /wp-content/uploads/.*\.php$ {
+        deny all;
+        return 404;
+    }
+    
+    # ============================================================
+    # REDIRECIONAMENTO HTTPS (quando SSL estiver configurado)
+    # ============================================================
+    # Descomente quando tiver certificado SSL:
+    # return 301 https://$server_name$request_uri;
+}
+
+# ============================================================
+# CONFIGURAÇÃO HTTPS (opcional - descomente quando usar SSL)
+# ============================================================
+# server {
+#     listen 443 ssl http2;
+#     listen [::]:443 ssl http2;
+#     server_name seudominio.com www.seudominio.com;
+#     
+#     ssl_certificate /etc/letsencrypt/live/seudominio.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/seudominio.com/privkey.pem;
+#     
+#     # Configurações SSL seguras
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#     ssl_ciphers HIGH:!aNULL:!MD5;
+#     ssl_prefer_server_ciphers on;
+#     
+#     # ... (incluir resto da configuração acima) ...
+# }
